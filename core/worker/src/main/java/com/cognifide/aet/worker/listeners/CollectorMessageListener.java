@@ -24,6 +24,7 @@ import com.cognifide.aet.communication.api.metadata.Url;
 import com.cognifide.aet.communication.api.queues.JmsConnection;
 import com.cognifide.aet.communication.api.util.ExecutionTimer;
 import com.cognifide.aet.job.api.collector.WebCommunicationWrapper;
+import com.cognifide.aet.job.api.exceptions.ProcessingException;
 import com.cognifide.aet.queues.JmsUtils;
 import com.cognifide.aet.worker.api.CollectorDispatcher;
 import com.cognifide.aet.worker.drivers.WebDriverProvider;
@@ -42,8 +43,8 @@ class CollectorMessageListener extends WorkerMessageListener {
   private final WebDriverProvider webDriverProvider;
 
   CollectorMessageListener(String name, CollectorDispatcher dispatcher,
-      WebDriverProvider webDriverProvider, JmsConnection jmsConnection, String consumerQueueName,
-      String producerQueueName) {
+                           WebDriverProvider webDriverProvider, JmsConnection jmsConnection, String consumerQueueName,
+                           String producerQueueName) {
     super(name, jmsConnection, consumerQueueName, producerQueueName);
     this.dispatcher = dispatcher;
     this.webDriverProvider = webDriverProvider;
@@ -60,29 +61,29 @@ class CollectorMessageListener extends WorkerMessageListener {
     String correlationId = JmsUtils.getJMSCorrelationID(message);
     String requestMessageId = JmsUtils.getJMSMessageID(message);
     if (collectorJobData != null && StringUtils.isNotBlank(correlationId)
-        && requestMessageId != null) {
+            && requestMessageId != null) {
       LOGGER.info(
-          "[{}] CollectorJobData message arrived with {} urls. CorrelationId: {} RequestMessageId: {}",
-          name, collectorJobData.getUrls().size(), correlationId,
-          requestMessageId);
+              "[{}] CollectorJobData message arrived with {} urls. CorrelationId: {} RequestMessageId: {}",
+              name, collectorJobData.getUrls().size(), correlationId,
+              requestMessageId);
       WebCommunicationWrapper webCommunicationWrapper = null;
       int collected = 0;
       String preferredWebDriver = collectorJobData.getPreferredBrowserId();
       try {
         if (isProxyUsed(collectorJobData.getProxy())) {
           webCommunicationWrapper = this.webDriverProvider
-              .createWebDriverWithProxy(preferredWebDriver, collectorJobData.getProxy());
+                  .createWebDriverWithProxy(preferredWebDriver, collectorJobData.getProxy());
         } else {
           webCommunicationWrapper = this.webDriverProvider.createWebDriver(preferredWebDriver);
         }
         collected = runUrls(collectorJobData, requestMessageId, webCommunicationWrapper,
-            correlationId);
+                correlationId);
 
-      } catch (WorkerException e) {
+      } catch (ProcessingException | WorkerException e) {
         for (Url url : collectorJobData.getUrls()) {
           String errorMessage = String.format(
-              "[%s] Couldn't process following url `%s` because of error: %s", name, url.getUrl(),
-              e.getMessage());
+                  "[%s] Couldn't process following url `%s` because of error: %s", name, url.getUrl(),
+                  e.getMessage());
           LOGGER.error(errorMessage, e);
           // updates all steps with worker exception
           for (final Step step : url.getSteps()) {
@@ -91,21 +92,20 @@ class CollectorMessageListener extends WorkerMessageListener {
           }
           // updates feedback queue
           CollectorResultData collectorResultData = CollectorResultData.createErrorResult(
-              url, ProcessingError.collectingError(errorMessage), requestMessageId,
-              collectorJobData.getTestName());
+                  url, ProcessingError.collectingError(errorMessage), requestMessageId,
+                  collectorJobData.getTestName());
           feedbackQueue.sendObjectMessageWithCorrelationID(collectorResultData, correlationId);
         }
       } finally {
         quitWebDriver(webCommunicationWrapper);
       }
       LOGGER.info("[{}] Successfully collected from {}/{} urls.", name, collected,
-          collectorJobData.getUrls().size());
+              collectorJobData.getUrls().size());
     }
-
   }
 
   private int runUrls(CollectorJobData collectorJobData, String requestMessageId,
-      WebCommunicationWrapper webCommunicationWrapper, String correlationId) {
+                      WebCommunicationWrapper webCommunicationWrapper, String correlationId) throws ProcessingException {
     int result = 0;
     for (Url url : collectorJobData.getUrls()) {
       try {
@@ -113,24 +113,30 @@ class CollectorMessageListener extends WorkerMessageListener {
         final Url processedUrl = dispatcher.run(url, collectorJobData, webCommunicationWrapper);
 
         final CollectorResultData collectorResultData = CollectorResultData
-            .createSuccessResult(processedUrl, requestMessageId,
-                collectorJobData.getTestName());
+                .createSuccessResult(processedUrl, requestMessageId,
+                        collectorJobData.getTestName());
         result++;
         timer.finishAndLog(processedUrl.getUrl());
         processedUrl.setCollectionStats(timer.toStatistics());
         feedbackQueue.sendObjectMessageWithCorrelationID(collectorResultData, correlationId);
+      } catch (ProcessingException e) {
+        CollectorResultData collectorResultData = CollectorResultData.createErrorResult(
+                url, ProcessingError.collectingError(e.getMessage()), requestMessageId,
+                collectorJobData.getTestName());
+        feedbackQueue.sendObjectMessageWithCorrelationID(collectorResultData, correlationId);
+        throw e;
       } catch (Exception e) {
         LOGGER.error("[{}] Unrecognized collector error", name, e);
         final String message = "Unrecognized collector error: " + e.getMessage();
         CollectorStepResult collectorStepProcessingError =
-            CollectorStepResult.newProcessingErrorResult(message);
+                CollectorStepResult.newProcessingErrorResult(message);
         for (Step step : url.getSteps()) {
           step.setStepResult(collectorStepProcessingError);
         }
 
         CollectorResultData collectorResultData = CollectorResultData.createErrorResult(
-            url, ProcessingError.collectingError(message), requestMessageId,
-            collectorJobData.getTestName());
+                url, ProcessingError.collectingError(message), requestMessageId,
+                collectorJobData.getTestName());
         feedbackQueue.sendObjectMessageWithCorrelationID(collectorResultData, correlationId);
       }
     }

@@ -25,8 +25,10 @@ import com.cognifide.aet.job.api.collector.CollectorJob;
 import com.cognifide.aet.job.api.collector.CollectorProperties;
 import com.cognifide.aet.job.api.collector.WebCommunicationWrapper;
 import com.cognifide.aet.job.api.exceptions.ParametersException;
+import com.cognifide.aet.job.api.exceptions.ProcessingException;
 import com.cognifide.aet.worker.api.CollectorDispatcher;
 import com.cognifide.aet.worker.api.JobRegistry;
+import com.cognifide.aet.worker.exceptions.WorkerException;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.osgi.service.component.annotations.Component;
@@ -44,13 +46,13 @@ public class CollectorDispatcherImpl implements CollectorDispatcher {
 
   @Override
   public Url run(Url url, CollectorJobData collectorJobData,
-      WebCommunicationWrapper webCommunicationWrapper) throws AETException {
+                 WebCommunicationWrapper webCommunicationWrapper) throws AETException {
     LOGGER.info(
-        "Start collection from {}, with {} steps to perform. Company: {} Project: {} TestSuite: {} Test: {}",
-        url.getUrl(), collectorJobData.getUrls().size(),
-        collectorJobData.getCompany(), collectorJobData.getProject(),
-        collectorJobData.getSuiteName(),
-        collectorJobData.getTestName());
+            "Start collection from {}, with {} steps to perform. Company: {} Project: {} TestSuite: {} Test: {}",
+            url.getUrl(), collectorJobData.getUrls().size(),
+            collectorJobData.getCompany(), collectorJobData.getProject(),
+            collectorJobData.getSuiteName(),
+            collectorJobData.getTestName());
 
     int stepNumber = 0;
     int totalSteps = url.getSteps().size();
@@ -58,26 +60,24 @@ public class CollectorDispatcherImpl implements CollectorDispatcher {
     for (final Step step : url.getSteps()) {
       stepNumber++;
       LOGGER.debug(
-          "Performing collection step {}/{}: {} named {} with parameters: {} from {}. Company: {} Project: {} TestSuite: {} Test: {}",
-          stepNumber, totalSteps, step.getType(), step.getName(), step.getParameters(),
-          url.getUrl(), collectorJobData.getCompany(), collectorJobData.getProject(),
-          collectorJobData.getSuiteName(),
-          collectorJobData.getTestName());
+              "Performing collection step {}/{}: {} named {} with parameters: {} from {}. Company: {} Project: {} TestSuite: {} Test: {}",
+              stepNumber, totalSteps, step.getType(), step.getName(), step.getParameters(),
+              url.getUrl(), collectorJobData.getCompany(), collectorJobData.getProject(),
+              collectorJobData.getSuiteName(),
+              collectorJobData.getTestName());
 
       final String urlWithDomain = StringUtils.trimToEmpty(url.getDomain()) + url.getUrl();
       CollectorJob collectorJob = getConfiguredCollector(step, urlWithDomain,
-          webCommunicationWrapper, collectorJobData);
+              webCommunicationWrapper, collectorJobData);
       ExecutionTimer timer = ExecutionTimer.createAndRun("collector");
       CollectorStepResult result = null;
       try {
         result = collectorJob.collect();
-      } catch (AETException e) {
-        final String message = String.format(
-            "Step: `%s` (with parameters: %s) thrown an exception when collecting url: %s in: `%s` test. Cause: %s",
-            step.getType(), step.getParameters(), url.getUrl(), collectorJobData.getTestName(),
-            getCause(e));
+      } catch (ProcessingException e) {
+        final String message = createErrorMessage(url, collectorJobData, step, e);
         result = CollectorStepResult.newProcessingErrorResult(message);
         LOGGER.error("Failed to perform one of collect steps: {}.", step, e);
+        throw new ProcessingException(message, e);
       } finally {
         timer.finishAndLog(step.getType());
         step.setStepResult(result);
@@ -86,11 +86,18 @@ public class CollectorDispatcherImpl implements CollectorDispatcher {
     }
 
     LOGGER.info(
-        "All collection steps from {} have been performed! Company: {} Project: {} TestSuite: {} Test: {}",
-        url.getUrl(), collectorJobData.getCompany(), collectorJobData.getProject(),
-        collectorJobData.getSuiteName(),
-        collectorJobData.getTestName());
+            "All collection steps from {} have been performed! Company: {} Project: {} TestSuite: {} Test: {}",
+            url.getUrl(), collectorJobData.getCompany(), collectorJobData.getProject(),
+            collectorJobData.getSuiteName(),
+            collectorJobData.getTestName());
     return url;
+  }
+
+  private String createErrorMessage(Url url, CollectorJobData collectorJobData, Step step, AETException e) {
+    return String.format(
+            "Step: `%s` (with parameters: %s) thrown an exception when collecting url: %s in: `%s` test. Cause: %s",
+            step.getType(), step.getParameters(), url.getUrl(), collectorJobData.getTestName(),
+            getCause(e));
   }
 
   private String getCause(AETException e) {
@@ -105,19 +112,19 @@ public class CollectorDispatcherImpl implements CollectorDispatcher {
   }
 
   private CollectorJob getConfiguredCollector(Step currentStep, String urlWithDomain,
-      WebCommunicationWrapper webCommunicationWrapper, CollectorJobData jobData)
-      throws ParametersException {
+                                              WebCommunicationWrapper webCommunicationWrapper, CollectorJobData jobData)
+          throws ParametersException {
     final String collectorType = currentStep.getType();
     if (jobRegistry.hasJob(collectorType)) {
       CollectorProperties collectorProperties = new CollectorProperties(urlWithDomain,
-          jobData.getCompany(), jobData.getProject(), currentStep.getPattern());
+              jobData.getCompany(), jobData.getProject(), currentStep.getPattern());
       return jobRegistry.getCollectorFactory(collectorType)
-          .createInstance(collectorProperties, currentStep.getParameters(),
-              webCommunicationWrapper);
+              .createInstance(collectorProperties, currentStep.getParameters(),
+                      webCommunicationWrapper);
     } else {
       throw new ParametersException(String
-          .format("Can not find collector with name '%s' while processing url: '%s'", collectorType,
-              urlWithDomain));
+              .format("Can not find collector with name '%s' while processing url: '%s'", collectorType,
+                      urlWithDomain));
     }
   }
 
